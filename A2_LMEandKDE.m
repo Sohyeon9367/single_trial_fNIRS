@@ -1,9 +1,10 @@
 %% ============================================================
-% A2_LMEandKDE (UPDATED)
+% A2_LMEandKDE (UPDATED - FULL)
 % - Use build_subject_features_latency.m (shared with A5) to generate trialTable (PeakTime).
 % - Do NOT modify build_subject_features_latency.m.
 % - Compute robustness timing metrics (Onset10 / HalfMax / COM) inside A2 only.
 % - Fit LME repeatedly across timing definitions to demonstrate robustness.
+% - Methods-aligned: Type III ANOVA (Satterthwaite), Bonferroni post-hoc, residual diagnostics
 %% ============================================================
 
 clear; clc;
@@ -19,7 +20,6 @@ maxWindow = 20;                         % seconds, for latency window end
 groupNames = {'HC','MCI','AD'};
 
 %% ----------------- 2) Build trialTable via shared function -----------------
-
 fprintf('✨ Preprocessing starts (via build_subject_features_latency)...\n');
 
 % IMPORTANT: rules are assigned here (A2-only); build_subject_features_latency.m is not modified.
@@ -38,7 +38,7 @@ rules.movmeanK = 3;
 % Shared function (also used in A5) produces PeakTime and trial identifiers
 [~, trialTable, rulesUsed] = build_subject_features_latency(dataPath, rules);
 
-% ---- Merge covariates (Age/Education) ----
+%% ---- Merge covariates (Age/Education) ----
 s_info = readtable(infoPath);
 
 % Robust ID handling (trim spaces, unify type)
@@ -53,7 +53,7 @@ trialTable = outerjoin(trialTable, cov, ...
     'Type','left', ...
     'MergeKeys', true);
 
-% ---- Standardize variable types ----
+%% ---- Standardize variable types ----
 % Group is assumed to be numeric (1/2/3). Map to HC/MCI/AD.
 trialTable.Group = categorical(trialTable.Group, [1 2 3], groupNames);
 
@@ -63,11 +63,11 @@ trialTable.ACC = categorical(lower(string(trialTable.ACC)), {'correct','incorrec
 % ID as categorical for LME random effect
 trialTable.ID = categorical(trialTable.ID);
 
-% ---- Add robustness timing metrics in A2 only ----
+%% ---- Add robustness timing metrics in A2 only ----
 fprintf('🔧 Computing robustness metrics (Onset10 / HalfMax / COM) inside A2...\n');
 [trialTable, qc] = add_latency_robustness_metrics_A2(trialTable, dataPath, rules);
 
-% ---- Save for reuse ----
+%% ---- Save for reuse ----
 save(savePath, 'trialTable', 'qc', 'rulesUsed');
 fprintf('✅ Saved: %s\n', savePath);
 
@@ -83,12 +83,11 @@ fprintf('\n[Robustness QC]\n');
 if exist('qc','var')
     disp(qc);
 end
-%% ----------------- 4. KDE Plot (Shared Legend, Updated) -----------------
 
+%% ----------------- 4) KDE Plot (Shared Legend, Updated) -----------------
 % Select which timing metric to visualize
 plotMetric = 'PeakTime';   % options: 'PeakTime','Onset10','HalfMax','COM'
 
-groupNames = {'HC','MCI','AD'};
 colors = [0, 0.447, 0.741; 
           0.85, 0.325, 0.098; 
           0.929, 0.694, 0.125];
@@ -100,67 +99,54 @@ titles = {['Correct Trials: ' plotMetric], ...
           ['Incorrect Trials: ' plotMetric]};
 acc_types = {'correct', 'incorrect'};
 
-p_h = [];
+% --- Robust categorical casting for older MATLAB versions ---
+groupCats = categorical(string(groupNames));
+accCats   = categorical(string(acc_types));
+
+p_h = gobjects(0);
 
 for i = 1:2
     ax = nexttile(tlo); hold on;
 
     for g = 1:3
-        % Extract data from trialTable (instead of masterData)
         data = trialTable.(plotMetric)( ...
-            trialTable.Group == groupNames{g} & ...
-            trialTable.ACC == acc_types{i});
+            trialTable.Group == groupCats(g) & ...
+            trialTable.ACC   == accCats(i));
 
         if isempty(data), continue; end
 
-        % Kernel density estimation
         [f, xi] = ksdensity(data, ...
             'Support', [0, maxWindow+0.5], ...
             'Boundary', 'reflection');
 
-        % Fill area
         fill(xi, f, colors(g,:), ...
             'FaceAlpha', 0.1, ...
             'EdgeColor', 'none', ...
             'HandleVisibility', 'off');
 
-        % Density line
         line_h = plot(xi, f, ...
             'Color', colors(g,:), ...
             'LineWidth', 2.5, ...
             'DisplayName', groupNames{g});
 
         if i == 1
-            p_h = [p_h, line_h];
+            p_h(end+1) = line_h; %#ok<SAGROW>
         end
     end
 
     title(titles{i}, 'FontSize', 15);
-
-    if strcmp(plotMetric,'PeakTime')
-        xlabel('Time to Peak (s)');
-    elseif strcmp(plotMetric,'Onset10')
-        xlabel('Onset 10% (s)');
-    elseif strcmp(plotMetric,'HalfMax')
-        xlabel('Half Maximum (s)');
-    else
-        xlabel('Center of Mass Time (s)');
-    end
-
     ylabel('Density');
     xlim([0 12]);
     ylim([0 0.8]);
     grid on;
     ax.GridAlpha = 0.1;
 end
-
-lgd = legend(p_h, groupNames);
-lgd.Layout.Tile = 'north';
-lgd.Orientation = "horizontal";
-lgd.Box = 'off';
-%% ----------------- 4) LME robustness: repeat model for multiple timing definitions -----------------
-% This is the core "robustness" evidence for reviewers:
-% If Group and/or Group×ACC effects persist across alternative latency definitions, credibility increases.
+%% ----------------- 5) LME robustness: repeat model for multiple timing definitions -----------------
+% Methods-aligned:
+% - Type III ANOVA with Satterthwaite DF
+% - Bonferroni-corrected post-hoc contrasts
+% - Residual diagnostics (Q–Q + residual–fitted)
+% - Optional random-slope robustness
 
 metrics = {'PeakTime','Onset10','HalfMax','COM'};
 
@@ -179,25 +165,75 @@ for m = 1:numel(metrics)
     fprintf('\n--- LME: %s ~ Group * ACC + Age + Education + (1|ID) ---\n', y);
     fprintf('Rows used: %d | Subjects used: %d\n', height(T), numel(unique(T.ID)));
 
+    % Fit LME
     form = sprintf('%s ~ Group * ACC + Age + Education + (1|ID)', y);
     lme = fitlme(T, form);
     disp(lme);
 
-    % Type III ANOVA (fixed effects significance)
-    a = dataset2table(anova(lme)); % columns: Term, DF, FStat, pValue, ...
+    % Type III ANOVA with Satterthwaite
+    anovaTable = anova(lme,'DFMethod','Satterthwaite');
+    disp('--- Type III ANOVA (Satterthwaite) ---');
+    disp(anovaTable);
 
-    % Extract key p-values (defensive coding in case term naming differs)
+    % Extract key p-values robustly
     pGroup = NaN; pACC = NaN; pInt = NaN;
-    if any(strcmp(a.Term,'Group')),      pGroup = a.pValue(strcmp(a.Term,'Group')); end
-    if any(strcmp(a.Term,'ACC')),        pACC   = a.pValue(strcmp(a.Term,'ACC')); end
-    if any(strcmp(a.Term,'Group:ACC')),  pInt   = a.pValue(strcmp(a.Term,'Group:ACC')); end
+    if any(strcmp(anovaTable.Term,'Group')),     pGroup = anovaTable.pValue(strcmp(anovaTable.Term,'Group')); end
+    if any(strcmp(anovaTable.Term,'ACC')),       pACC   = anovaTable.pValue(strcmp(anovaTable.Term,'ACC')); end
+    if any(strcmp(anovaTable.Term,'Group:ACC')), pInt   = anovaTable.pValue(strcmp(anovaTable.Term,'Group:ACC')); end
 
-    robustTbl.Metric(ri,1) = string(y);
-    robustTbl.RowsUsed(ri,1) = height(T);
+    robustTbl.Metric(ri,1)       = string(y);
+    robustTbl.RowsUsed(ri,1)     = height(T);
     robustTbl.SubjectsUsed(ri,1) = numel(unique(T.ID));
-    robustTbl.p_Group(ri,1) = pGroup;
-    robustTbl.p_ACC(ri,1) = pACC;
-    robustTbl.p_GroupXACC(ri,1) = pInt;
+    robustTbl.p_Group(ri,1)      = pGroup;
+    robustTbl.p_ACC(ri,1)        = pACC;
+    robustTbl.p_GroupXACC(ri,1)  = pInt;
+
+    % Post-hoc (Bonferroni): Group, ACC, and Group×ACC simple effects table
+    disp('--- Post-hoc Pairwise Comparisons (Group; Bonferroni) ---');
+    try
+        posthocGroup = multcompare(lme,'Group','ComparisonType','bonferroni');
+        disp(posthocGroup);
+    catch ME
+        warning('Post-hoc Group multcompare failed: %s', ME.message);
+    end
+
+    disp('--- Post-hoc Pairwise Comparisons (ACC; Bonferroni) ---');
+    try
+        posthocACC = multcompare(lme,'ACC','ComparisonType','bonferroni');
+        disp(posthocACC);
+    catch ME
+        warning('Post-hoc ACC multcompare failed: %s', ME.message);
+    end
+
+    disp('--- Post-hoc Simple Effects (Group within ACC; Bonferroni) ---');
+    try
+        posthocInt = multcompare(lme,{'Group','ACC'},'ComparisonType','bonferroni');
+        disp(posthocInt);
+    catch ME
+        warning('Post-hoc interaction multcompare failed: %s', ME.message);
+    end
+
+    % Residual diagnostics (save one figure per metric)
+    try
+        fig = figure('Color','w','Position',[100 100 900 400]);
+        tiledlayout(1,2,'Padding','compact','TileSpacing','compact');
+        nexttile; plotResiduals(lme,'probability'); title(sprintf('%s: Q-Q', y));
+        nexttile; plotResiduals(lme,'fitted');      title(sprintf('%s: Residuals vs Fitted', y));
+        saveas(fig, sprintf('LME_residual_diagnostics_%s.png', y));
+        close(fig);
+    catch ME
+        warning('Residual diagnostics failed: %s', ME.message);
+    end
+
+    % Random slope robustness (optional but useful for rebuttal)
+    try
+        formRS = sprintf('%s ~ Group * ACC + Age + Education + (ACC|ID)', y);
+        lme_rs = fitlme(T, formRS);
+        disp('--- Random Slope Model Comparison ---');
+        disp(compare(lme, lme_rs));
+    catch ME
+        warning('Random slope model failed: %s', ME.message);
+    end
 
     ri = ri + 1;
 end
@@ -205,21 +241,17 @@ end
 fprintf('\n================== Robustness Summary (Type III p-values) ==================\n');
 disp(robustTbl);
 
-
-%% ----------------- Descriptive latency summaries (robust across MATLAB versions) -----------------
-% Computes observed (non-model) Mean / SD / CV / N by Group × ACC.
-% Handles MATLAB version differences in groupsummary() output variable names.
+%% ----------------- 6) Descriptive latency summaries (robust across MATLAB versions) -----------------
+% Computes observed Mean / SD / CV / N by Group × ACC.
 
 metricForText = 'PeakTime';  % or 'Onset10','HalfMax','COM'
 
 Tdesc = rmmissing(trialTable, 'DataVariables', {metricForText});
 
-% Trial-level summary
 statsGA = groupsummary(Tdesc, {'Group','ACC'}, {'mean','std'}, metricForText);
 
-% 1) Rename mean/std columns robustly
+% Rename mean/std columns robustly
 vars = statsGA.Properties.VariableNames;
-
 meanVar = vars(startsWith(vars, 'mean_'));
 stdVar  = vars(startsWith(vars,  'std_'));
 
@@ -227,19 +259,18 @@ if ~isempty(meanVar)
     idx = find(strcmp(vars, meanVar{1}), 1);
     statsGA.Properties.VariableNames{idx} = 'Mean';
 end
-vars = statsGA.Properties.VariableNames; % refresh
+vars = statsGA.Properties.VariableNames;
 
 if ~isempty(stdVar)
     idx = find(strcmp(vars, stdVar{1}), 1);
     statsGA.Properties.VariableNames{idx} = 'SD';
 end
-vars = statsGA.Properties.VariableNames; % refresh
+vars = statsGA.Properties.VariableNames;
 
-% 2) Create N robustly (MATLAB often provides GroupCount)
+% N robustly
 if ismember('GroupCount', vars)
     statsGA.N = statsGA.GroupCount;
 else
-    % Fallback: compute N manually if GroupCount is not present
     tmpN = groupsummary(Tdesc, {'Group','ACC'}, 'numel', metricForText);
     varsN = tmpN.Properties.VariableNames;
     nVar = varsN(startsWith(varsN, 'numel_'));
@@ -249,22 +280,75 @@ else
     statsGA.N = tmpN.(nVar{1});
 end
 
-% 3) Compute CV
+% CV
 if ~all(ismember({'Mean','SD'}, statsGA.Properties.VariableNames))
     error('Mean/SD columns not found after renaming.');
 end
 statsGA.CV = statsGA.SD ./ statsGA.Mean;
 
-% 4) Sort for readability
 statsGA = sortrows(statsGA, {'ACC','Group'});
 
 fprintf('\n================== Descriptive (Observed) %s by Group × ACC ==================\n', metricForText);
 disp(statsGA(:, {'Group','ACC','Mean','CV','N'}));
+%% ----------------- True subject-level effect sizes -----------------
 
-%% ----------------- Selection-bias check: exclusion due to short trial duration -----------------
-% This section quantifies how many trials were excluded because duration < minDuration,
-% reported overall and by diagnostic group (HC/MCI/AD).
-% It does NOT require modifying build_subject_features_latency.m.
+metricES = 'PeakTime';
+Tes = rmmissing(trialTable, 'DataVariables', {metricES});
+
+% 1) Trial-level → Subject-level mean per ACC
+subjMean = groupsummary(Tes, {'ID','Group','ACC'}, 'mean', metricES);
+
+% Rename
+v = subjMean.Properties.VariableNames;
+mv = v(startsWith(v,'mean_'));
+subjMean.Properties.VariableNames{strcmp(v,mv{1})} = 'Mean';
+
+% 2) Now collapse across channels/trials → one value per subject per ACC
+subjMean = groupsummary(subjMean, {'ID','Group','ACC'}, 'mean', 'Mean');
+
+v = subjMean.Properties.VariableNames;
+mv = v(startsWith(v,'mean_'));
+subjMean.Properties.VariableNames{strcmp(v,mv{1})} = 'Mean';
+
+% 3) Pivot
+subjWide = unstack(subjMean, 'Mean', 'ACC');
+
+% Ensure unique subjects
+subjWide = unique(subjWide(:,{'ID','Group','correct','incorrect'}));
+
+subjWide.Delta = subjWide.incorrect - subjWide.correct;
+valid = isfinite(subjWide.correct) & isfinite(subjWide.incorrect);
+subjWide = subjWide(valid,:);
+% Helper functions
+cohens_d_ind = @(x,y) (mean(x)-mean(y)) ./ ...
+    sqrt(((var(x)*(length(x)-1)) + (var(y)*(length(y)-1))) / ...
+    (length(x)+length(y)-2));
+
+cohens_dz = @(d) mean(d) ./ std(d);
+
+gHC  = subjWide.Group=='HC';
+gMCI = subjWide.Group=='MCI';
+gAD  = subjWide.Group=='AD';
+
+d_HC_MCI_correct = cohens_d_ind(subjWide.correct(gHC), subjWide.correct(gMCI));
+d_HC_AD_correct  = cohens_d_ind(subjWide.correct(gHC), subjWide.correct(gAD));
+d_MCI_AD_correct = cohens_d_ind(subjWide.correct(gMCI), subjWide.correct(gAD));
+
+dz_HC  = cohens_dz(subjWide.Delta(gHC));
+dz_MCI = cohens_dz(subjWide.Delta(gMCI));
+dz_AD  = cohens_dz(subjWide.Delta(gAD));
+
+effectSizeTbl = table( ...
+    d_HC_MCI_correct, d_HC_AD_correct, d_MCI_AD_correct, ...
+    dz_HC, dz_MCI, dz_AD);
+
+disp(effectSizeTbl);
+
+fprintf('True Subject N (HC/MCI/AD) = %d / %d / %d\n', ...
+    sum(gHC), sum(gMCI), sum(gAD));
+
+%% ----------------- 7) Selection-bias check: exclusion due to short trial duration -----------------
+% Quantifies trials excluded because duration < minDuration, overall and by group.
 
 S = load(dataPath);
 assert(isfield(S,'allSubjects'), 'MAT file must contain allSubjects');
@@ -273,12 +357,10 @@ allSubjects = S.allSubjects;
 minDur = rulesUsed.minDuration;  % should be 1.2131
 grpLevels = {'HC','MCI','AD'};
 
-% Counters per group
-count_totalTrials = zeros(3,1);      % all Stroop trials encountered (regardless of correctness)
-count_shortTrials = zeros(3,1);      % duration < minDur
-count_longTrials  = zeros(3,1);      % duration >= minDur
+count_totalTrials = zeros(3,1);
+count_shortTrials = zeros(3,1);
+count_longTrials  = zeros(3,1);
 
-% Optional: check whether short trials are systematically "faster" in behavior (if RT exists)
 hasRT = false;
 shortRT = cell(3,1);
 longRT  = cell(3,1);
@@ -304,8 +386,6 @@ for sIdx = 1:numel(allSubjects)
             count_longTrials(gNum) = count_longTrials(gNum) + 1;
         end
 
-        % If behavioral RT is available, collect it to support the "fast trials" argument
-        % Common field names might be 'RT', 'reactionTime', or similar.
         rt = NaN;
         if isfield(tr,'RT'), rt = tr.RT; end
         if ~isfinite(rt) && isfield(tr,'reactionTime'), rt = tr.reactionTime; end
@@ -321,7 +401,6 @@ for sIdx = 1:numel(allSubjects)
     end
 end
 
-% Summarize exclusion rates
 exclRate = 100 * (count_shortTrials ./ max(count_totalTrials,1));
 
 biasTbl = table(grpLevels(:), count_totalTrials, count_shortTrials, count_longTrials, exclRate, ...
@@ -330,7 +409,6 @@ biasTbl = table(grpLevels(:), count_totalTrials, count_shortTrials, count_longTr
 fprintf('\n================== Exclusion due to short trial duration (< %.2fs) ==================\n', minDur);
 disp(biasTbl);
 
-% Optional: if RT exists, compare RT distributions for short vs long trials by group
 if hasRT
     fprintf('\n[Optional RT check] Comparing RT for short vs long trials (if RT available)\n');
     for g = 1:3
@@ -342,6 +420,91 @@ if hasRT
 else
     fprintf('\n[Note] No RT field found in trials; duration-based exclusion is quantified but "fast trials" cannot be directly validated.\n');
 end
+
+fprintf('\n[Interpretation note] Exclusion rates differ by group; consider reporting in Supplement and running sensitivity analysis (vary minDuration).\n');
+
+%% --- Post-hoc contrasts via coefTest (Bonferroni corrected) ---
+
+disp('--- Planned contrasts (coefTest + Bonferroni) ---');
+
+coefNames = lme.CoefficientNames;
+
+% Helper: index finder
+getIdx = @(name) find(strcmp(coefNames,name));
+
+% Coefficients expected:
+% (Intercept)
+% Group_MCI
+% Group_AD
+% ACC_incorrect
+% Age
+% Education
+% Group_MCI:ACC_incorrect
+% Group_AD:ACC_incorrect
+
+idx_MCI = getIdx('Group_MCI');
+idx_AD  = getIdx('Group_AD');
+idx_ACC = getIdx('ACC_incorrect');
+idx_MCI_ACC = getIdx('Group_MCI:ACC_incorrect');
+idx_AD_ACC  = getIdx('Group_AD:ACC_incorrect');
+
+nCoef = numel(coefNames);
+
+contrasts = {};
+pvals = [];
+
+% HC vs MCI (correct trials baseline)
+C = zeros(1,nCoef);
+C(idx_MCI) = 1;
+[p, F, df1, df2] = coefTest(lme,C);
+contrasts{end+1} = 'HC vs MCI (correct)';
+pvals(end+1) = p;
+
+% HC vs AD (correct)
+C = zeros(1,nCoef);
+C(idx_AD) = 1;
+[p, F, df1, df2] = coefTest(lme,C);
+contrasts{end+1} = 'HC vs AD (correct)';
+pvals(end+1) = p;
+
+% MCI vs AD (correct)
+C = zeros(1,nCoef);
+C(idx_MCI) = 1;
+C(idx_AD)  = -1;
+[p, F, df1, df2] = coefTest(lme,C);
+contrasts{end+1} = 'MCI vs AD (correct)';
+pvals(end+1) = p;
+
+% ACC effect within HC
+C = zeros(1,nCoef);
+C(idx_ACC) = 1;
+[p, F, df1, df2] = coefTest(lme,C);
+contrasts{end+1} = 'ACC effect in HC';
+pvals(end+1) = p;
+
+% ACC effect within MCI
+C = zeros(1,nCoef);
+C(idx_ACC) = 1;
+C(idx_MCI_ACC) = 1;
+[p, F, df1, df2] = coefTest(lme,C);
+contrasts{end+1} = 'ACC effect in MCI';
+pvals(end+1) = p;
+
+% ACC effect within AD
+C = zeros(1,nCoef);
+C(idx_ACC) = 1;
+C(idx_AD_ACC) = 1;
+[p, F, df1, df2] = coefTest(lme,C);
+contrasts{end+1} = 'ACC effect in AD';
+pvals(end+1) = p;
+
+% Bonferroni correction
+pvals_bonf = min(pvals * numel(pvals),1);
+
+posthocTbl = table(contrasts', pvals', pvals_bonf', ...
+    'VariableNames',{'Contrast','p_raw','p_Bonferroni'});
+
+disp(posthocTbl);
 %% ============================================================
 % Local function(s): A2-only (do not touch build_subject_features_latency.m)
 %% ============================================================
@@ -365,8 +528,7 @@ trialTable.Onset10 = NaN(height(trialTable),1);
 trialTable.HalfMax = NaN(height(trialTable),1);
 trialTable.COM     = NaN(height(trialTable),1);
 
-% Build a fast lookup from key -> row index
-% key format: "ID|TrialIndex|Channel"
+% Build lookup key -> row index
 keys = strings(height(trialTable),1);
 for i = 1:height(trialTable)
     keys(i) = string(trialTable.ID(i)) + "|" + string(trialTable.TrialIndex(i)) + "|" + string(trialTable.Channel(i));
@@ -402,13 +564,11 @@ for sIdx = 1:numel(allSubjects)
         nCh  = size(HbO,2);
         L    = size(HbO,1);
 
-        % Window indices
         i0 = max(1, round(winStartS*fs) + 1);
         i1 = min(L, round(winEndS*fs) + 1);
         if i0 >= i1, continue; end
         winIdx = i0:i1;
 
-        % Baseline window: [0, winStartS)
         baseIdx = 1:max(1, i0-1);
 
         sigCh = find(pHbO < rules.pThreshold);
@@ -416,7 +576,6 @@ for sIdx = 1:numel(allSubjects)
         for ch = sigCh(:)'
             if ch < 1 || ch > nCh, continue; end
 
-            % SNR filter (same as main extraction)
             if numel(subjSNR) >= ch && subjSNR(ch) < rules.snrThreshold
                 continue;
             end
@@ -430,7 +589,6 @@ for sIdx = 1:numel(allSubjects)
 
             ts = HbO(:,ch);
 
-            % Apply the same smoothing rule as extraction
             ts_s = ts;
             if isfield(rules,'smoothing') && strcmpi(rules.smoothing,'sgolay')
                 F = min(rules.maxFrame, L);
@@ -444,7 +602,6 @@ for sIdx = 1:numel(allSubjects)
                 ts_s = movmean(ts, rules.movmeanK);
             end
 
-            % Use PeakTime already in trialTable
             peakTime = trialTable.PeakTime(row);
             if ~isfinite(peakTime), continue; end
             idxPeak = round(peakTime*fs) + 1;
@@ -454,27 +611,23 @@ for sIdx = 1:numel(allSubjects)
             peakVal = ts_s(idxPeak);
             amp = peakVal - baseVal;
 
-            % If amplitude is not positive, onset/half/COM are not meaningful
             if ~(isfinite(amp) && amp > 0)
                 qc.robust_amp_nonpos = qc.robust_amp_nonpos + 1;
                 continue;
             end
 
-            % Onset10 (10% rise)
             thr10 = baseVal + 0.10 * amp;
             idx10 = find(ts_s(winIdx) >= thr10, 1, 'first');
             if ~isempty(idx10)
                 trialTable.Onset10(row) = (winIdx(idx10)-1)/fs;
             end
 
-            % HalfMax (50% rise)
             thr50 = baseVal + 0.50 * amp;
             idx50 = find(ts_s(winIdx) >= thr50, 1, 'first');
             if ~isempty(idx50)
                 trialTable.HalfMax(row) = (winIdx(idx50)-1)/fs;
             end
 
-            % Center-of-mass time (positive area above baseline)
             w = ts_s(winIdx) - baseVal;
             w(w < 0) = 0;
             if sum(w) > 0
