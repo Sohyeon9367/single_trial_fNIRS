@@ -138,6 +138,15 @@ for m = 1:4
     
     xlabel('Hemodynamic Latency (s)');
     ylabel(metricLabels{m});
+    % --- Y축 범위 개별 설정 추가 ---
+    if strcmpi(target, 'MoCA')
+        ylim([-5, 32]);
+        yticks(-5:5:30); % 선택사항: 눈금 간격 조정
+    elseif strcmpi(target, 'Education')
+        ylim([0, 18]);
+        yticks(0:3:18);  % 선택사항: 눈금 간격 조정
+    end
+    % --------------------------
     grid on; set(gca, 'TickDir', 'out', 'Box', 'on', 'LineWidth', 1.2);
     
     % 범례는 첫 번째 그래프에만 표시 (깔끔하게)

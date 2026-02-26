@@ -201,29 +201,76 @@ end
 %  TABLE-BASED DESCRIPTIVE STATISTICS (masterData)
 %  - Stats: Mean, CV, N (Grouped by Group & ACC)
 % ============================================================
-%% ----------------- 1. Group Summary -----------------
+%% ============================================================
+%  TABLE-BASED DESCRIPTIVE STATISTICS & ABSTRACT VALIDATION
+% ============================================================
 
+% 1. Group Summary
 statsTable = groupsummary(masterData, {'Group', 'ACC'}, {'mean', 'std'}, 'Latency');
-%% ----------------- 2. Calculate CV-----------------
+
+% 2. CV (Temporal Jitter) 계산
 statsTable.CV = statsTable.std_Latency ./ statsTable.mean_Latency;
 
+% 카테고리 비교를 위한 변환
+statsTable.Group_Str = string(statsTable.Group);
+statsTable.ACC_Str = string(statsTable.ACC);
 
-fprintf('\n=== [Summary] ===\n');
+% 출력 (수정됨: [] 사용)
+fprintf(['\n', repmat('=', 1, 60), '\n']);
+fprintf('   FINAL STATISTICAL SUMMARY (Validation for Abstract)\n');
+fprintf([repmat('=', 1, 60), '\n']);
 
 groups = {'HC', 'MCI', 'AD'};
 conditions = {'correct', 'incorrect'};
 
+valData = struct();
+
 for c = 1:2
-    fprintf('\n[%s Trials]\n', upper(conditions{c}));
+    cond = conditions{c};
+    fprintf('\n[%s Trials]\n', upper(cond));
+    fprintf('------------------------------------------------------------\n');
     for g = 1:3
-        row = statsTable(strcmpi(statsTable.Group, groups{g}) & ...
-                         strcmpi(statsTable.ACC, conditions{c}), :);
+        grp = groups{g};
+        row = statsTable(statsTable.Group_Str == grp & statsTable.ACC_Str == cond, :);
         
         if ~isempty(row)
-            fprintf('%s: Mean = %.2f s (CV = %.2f, N = %s)\n', ...
-                groups{g}, row.mean_Latency, row.CV, f_comma(row.GroupCount));
+            mVal = row.mean_Latency;
+            cvVal = row.CV;
+            nVal = row.GroupCount;
+            valData.(grp).(cond) = mVal;
+            
+            fprintf('%-3s: Mean = %5.2f s | CV = %4.2f (Jitter) | N = %s\n', ...
+                grp, mVal, cvVal, f_comma(nVal));
+        else
+            valData.(grp).(cond) = NaN;
+            fprintf('%-3s: No Data available\n', grp);
         end
     end
 end
+
+%% 3. 초록 핵심 수치 검증
+fprintf(['\n', repmat('-', 1, 60), '\n']);
+fprintf('   HYPOTHESIS TESTING (Relative to HC)\n');
+fprintf([repmat('-', 1, 60), '\n']);
+
+if isfield(valData, 'AD') && isfield(valData, 'HC')
+    % AD vs HC 전체 지연
+    ad_delay = valData.AD.correct - valData.HC.correct;
+    fprintf('1. AD vs HC Delay (Correct):  %5.2f s (Abstract: ~1.48s)\n', ad_delay);
+    
+    % AD 내 지연 차이
+    ad_acc_diff = valData.AD.incorrect - valData.AD.correct;
+    hc_acc_diff = valData.HC.incorrect - valData.HC.correct;
+    
+    fprintf('2. AD Incorrect vs Correct:   %5.2f s (Abstract: ~2.88s extra)\n', ad_acc_diff);
+    fprintf('3. HC Incorrect vs Correct:   %5.2f s (Abstract: "Stable")\n', hc_acc_diff);
+    
+    if ad_acc_diff > hc_acc_diff
+        fprintf('   => Interaction Trend: [MATCH] AD shows larger delay on errors.\n');
+    else
+        fprintf('   => Interaction Trend: [MISMATCH] Check data labeling.\n');
+    end
+end
+fprintf([repmat('=', 1, 60), '\n']);
 
 function str = f_comma(n), str = regexprep(num2str(n), '(?<=\d)(?=(\d{3})+(?!\d))', ','); end
