@@ -79,7 +79,6 @@ Step 2 — Run latency analysis
 
 In MATLAB:
 
-```matlab
 A2_LMEandKDE
 
 This generates:
