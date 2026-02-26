@@ -1,8 +1,8 @@
-# single_trial_fNIRS
+### single_trial_fNIRS
 
-Single-trial fNIRS hemodynamic latency analysis pipeline for studying neurovascular dysfunction across the Alzheimer’s disease (AD) continuum.
+Single-trial fNIRS hemodynamic latency analysis pipeline for investigating neurovascular dysfunction across the Alzheimer’s disease (AD) continuum.
 
-This repository contains all MATLAB scripts required to reproduce the latency modeling, linear mixed-effects analysis, and LOSO classification results.
+This repository contains MATLAB scripts required to reproduce single-trial latency modeling, linear mixed-effects analysis, topographic visualization, behavioral correlations, and Leave-One-Subject-Out (LOSO) classification.
 
 ---
 
@@ -30,47 +30,52 @@ single_trial_fNIRS/
 
 The pipeline performs:
 
-1. MBLL conversion (raw → HbO/HbR)
-2. Trial-level GLM modeling
-3. Single-trial peak latency extraction
-4. Linear Mixed-Effects modeling:
+1. **MBLL conversion** (raw light intensity → HbO/HbR)
+2. **Trial-level GLM modeling**
+3. **Single-trial peak latency extraction**
+4. **Linear Mixed-Effects modeling**
+
 
 Latency ~ Group * ACC + Age + Education + (1|SubjectID)
 
-5. Kernel Density Estimation (KDE) of latency distributions
-6. Leave-One-Subject-Out (LOSO) classification
-- Latency-based
-- Beta difference–based
+
+5. **Kernel Density Estimation (KDE)** of latency distributions
+6. **Leave-One-Subject-Out (LOSO) classification**
+- Latency-based features
+- Beta difference–based features
 - Combined model
-- Permutation-based AUC testing
+- Permutation-based AUC significance testing
 
 ---
 
 ## 📦 Data Availability
 
-The preprocessed dataset (compressed, 65MB) is included in:
+The preprocessed dataset (compressed, 65MB) is included in this repository:
 
- Stroop_AllSubjects_NIRS_HRF_TTest_05.zip
 
-All subjects are anonymized and identified using research codes.  
+Stroop_AllSubjects_NIRS_HRF_TTest_05.zip
+
+
+All subjects are anonymized and identified using research codes (e.g., HC01, MCI03, AD07).  
 No personally identifiable information is included.
 
 ---
 
 ## 🔁 Reproducing the Main Results
 
-### Step 1 — Unzip dataset
+Step 1 — Unzip dataset
 
 Extract:
 
 
 Stroop_AllSubjects_NIRS_HRF_TTest_05.zip
 
-Place the extracted `.mat` file inside:
+
+Place the extracted `.mat` file in the repository root directory.
 
 ---
 
-### Step 2 — Run latency analysis
+Step 2 — Run latency analysis
 
 In MATLAB:
 
@@ -81,11 +86,22 @@ This generates:
 
 Trial-level latency table
 
-LME results
+Linear mixed-effects (LME) results
 
-KDE distributions
+KDE-based latency distributions
 
-Step 3 — Run classification
+Step 3 — Topographic mapping
+A3_averaged_beta_map
+A4_Advanced_topographic_map
+
+These scripts generate channel-wise averaged beta maps and advanced topographic visualizations.
+
+Step 4 — Correlation with behavioral data
+A5_behaviour_hemodynamics_correlation
+
+Performs correlation analyses between hemodynamic features and behavioral performance metrics.
+
+Step 5 — Run classification
 A6_run_loso_full
 
 This performs:
@@ -104,7 +120,7 @@ Statistics and Machine Learning Toolbox
 
 Signal Processing Toolbox
 
-SPM (for spm_hrf) added to MATLAB path
+SPM (for spm_hrf) added to the MATLAB path
 
 👤 Maintainer
 
