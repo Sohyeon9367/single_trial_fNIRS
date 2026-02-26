@@ -1,372 +1,354 @@
 %% ============================================================
-% ADVANCED BRAIN-BEHAVIOR INTEGRATION
-% Incorporating SNR Filtering, ID Matching, and Partial Correlation
+% ADVANCED BRAIN-BEHAVIOR INTEGRATION (CLEANED / REVIEWER-READY)
+% - Unified latency extraction via build_subject_features_latency()
+% - Single ID merge (no duplicates)
+% - Partial Spearman = Spearman on residualized ranks
+% - Bootstrap for CI only, permutation for p-value only (two-sided, +1 correction)
+% - Optional: within-group and group-controlled checks for reviewer defense
 %% ============================================================
+
 clear; clc; close all;
 set(0, 'DefaultFigureColor', 'w');
-%% ----------------- 1. Load Data -----------------
-load('D:\1_MPI_CBS\0_Research\0_MCI_classification\Processed\Stroop_AllSubjects_NIRS_HRF_TTest_05.mat');
-behavTable = readtable('D:\1_MPI_CBS\0_Research\0_MCI_classification\Raw data\subject_info.xlsx');
 
-fs = 8.138;
-snrThreshold = 30;
+%% ----------------- 1. Load Data -----------------
+rawMatPath = 'D:\1_MPI_CBS\0_Research\0_MCI_classification\Processed\Stroop_AllSubjects_NIRS_HRF_TTest_05.mat';
+behavPath  = 'D:\1_MPI_CBS\0_Research\0_MCI_classification\Raw data\subject_info.xlsx';
+
+behavTable = readtable(behavPath);
+
+% Plot settings
 groupNames = {'HC', 'MCI', 'AD'};
 colors = [0, 0.447, 0.741; 0.85, 0.325, 0.098; 0.929, 0.694, 0.125];
 
-%% ----------------- 2. Robust Feature Extraction (with SNR Filter) -----------------
-subjectFeatures = table();
+%% ----------------- 2. Robust Feature Extraction (A5 logic) -----------------
+% Ensure build_subject_features_latency is on path
+% addpath(fullfile(pwd,'utils'));
 
-for s = 1:numel(allSubjects)
-    subj = allSubjects(s).results;
-    subjID = subj.ID; % 예: 'A1', 'B2' 등
-    subjSNR = subj.SNR;
-    
-    subj_latencies = [];
-    for t = 1:numel(subj.Trials)
-        tr = subj.Trials(t).results;    
-        if tr.duration < 1.2131, continue; end
-        if ~strcmpi(tr.ACC, 'correct'), continue; end
-        
-        sigCh = find(tr.p_HbO < 0.05);
-        for ch = sigCh'
-            if subjSNR(ch) < snrThreshold, continue; end
-            
-            ts = tr.HbO(:, ch);
-            L = length(ts);
-            F = min(31, L); if mod(F, 2) == 0, F = F - 1; end 
-            if F > 3, ts_s = sgolayfilt(ts, 3, F); else, ts_s = movmean(ts, 3); end
-            
-            [~, idx] = max(ts_s);
-            pTime = (idx - 1) / fs;
-            if pTime >= 0 && pTime <= 15, subj_latencies = [subj_latencies; pTime]; end
-        end
-    end
-    
-    if ~isempty(subj_latencies)
-        res = table();
-        res.ID = {subjID}; 
-        res.Group = subj.Group;
-        res.Latency = mean(subj_latencies);
-        subjectFeatures = [subjectFeatures; res];
-    end
-end
+rules.fs = 8.138;
+rules.snrThreshold = 30;
+rules.pThreshold = 0.05;
+rules.correctOnly = false;
+rules.minDuration = 1.2131;
+rules.latencyWindow = [0 15];
+rules.smoothing = 'sgolay';
+rules.sgolayOrder = 3;
+rules.maxFrame = 31;
+rules.movmeanK = 3;
 
-%% ----------------- 3. Smart Merge by ID -----------------
+[subjectFeatures, trialTable, rulesUsed] = build_subject_features_latency(rawMatPath, rules);
+
+% Expect subjectFeatures columns: ID, Group, Latency, NPeaksUsed
+assert(any(strcmp(subjectFeatures.Properties.VariableNames,'ID')), 'subjectFeatures must contain ID');
+assert(any(strcmp(subjectFeatures.Properties.VariableNames,'Group')), 'subjectFeatures must contain Group');
+assert(any(strcmp(subjectFeatures.Properties.VariableNames,'Latency')), 'subjectFeatures must contain Latency');
+
+%% ----------------- 3. Smart Merge by ID (single pass) -----------------
+% Normalize IDs
+behavIDs = lower(strtrim(string(behavTable.SubjectID)));
+subjectFeatures.ID = lower(strtrim(string(subjectFeatures.ID)));
+
 finalData = table();
 for i = 1:height(subjectFeatures)
-    targetID = subjectFeatures.ID{i};
-    rowIdx = find(strcmpi(behavTable.SubjectID, targetID));
-    
-    if ~isempty(rowIdx)
-        temp = subjectFeatures(i, :);
-        temp.MMSE = (behavTable.MMSE(rowIdx) + behavTable.MMSE_1(rowIdx)) / 2;
-        temp.MoCA = behavTable.Moca(rowIdx);
-        temp.Accuracy = behavTable.K_CWST(rowIdx);
-        temp.Education = behavTable.Education(rowIdx);
-        temp.Age = behavTable.Age(rowIdx);
-        finalData = [finalData; temp];
+    targetID = subjectFeatures.ID(i);
+    rowIdx = find(behavIDs == targetID, 1, 'first');
+    if isempty(rowIdx), continue; end
+
+    temp = subjectFeatures(i, :);
+
+    % Safe column access (case-insensitive)
+    temp.MMSE = NaN;
+    if any(strcmpi(behavTable.Properties.VariableNames,'MMSE')) && any(strcmpi(behavTable.Properties.VariableNames,'MMSE_1'))
+        temp.MMSE = mean([behavTable.MMSE(rowIdx), behavTable.MMSE_1(rowIdx)], 'omitnan');
+    elseif any(strcmpi(behavTable.Properties.VariableNames,'MMSE'))
+        temp.MMSE = behavTable.MMSE(rowIdx);
     end
+
+    temp.MoCA = NaN;
+    if any(strcmpi(behavTable.Properties.VariableNames,'Moca')) || any(strcmpi(behavTable.Properties.VariableNames,'MoCA'))
+        col = strcmpi(behavTable.Properties.VariableNames,'Moca') | strcmpi(behavTable.Properties.VariableNames,'MoCA');
+        temp.MoCA = behavTable{rowIdx, col};
+    end
+
+    temp.Accuracy = NaN;
+    if any(strcmpi(behavTable.Properties.VariableNames,'K_CWST'))
+        temp.Accuracy = behavTable.K_CWST(rowIdx);
+    end
+
+    temp.Education = NaN;
+    if any(strcmpi(behavTable.Properties.VariableNames,'Education'))
+        temp.Education = behavTable.Education(rowIdx);
+    end
+
+    temp.Age = NaN;
+    if any(strcmpi(behavTable.Properties.VariableNames,'Age'))
+        temp.Age = behavTable.Age(rowIdx);
+    end
+
+    finalData = [finalData; temp]; %#ok<AGROW>
+end
+
+% Ensure numeric types
+finalData.Latency   = double(finalData.Latency);
+finalData.Education = double(finalData.Education);
+finalData.Age       = double(finalData.Age);
+finalData.MMSE      = double(finalData.MMSE);
+finalData.MoCA      = double(finalData.MoCA);
+finalData.Accuracy  = double(finalData.Accuracy);
+
+% Group should be numeric 1/2/3 or categorical; make it numeric for easy indexing
+if iscategorical(finalData.Group)
+    % If categorical labels exist, map explicitly if possible
+    % Otherwise, fallback to category order.
+    cats = categories(finalData.Group);
+    gnum = double(finalData.Group);
+    finalData.GroupNum = gnum;
+else
+    finalData.GroupNum = double(finalData.Group);
 end
 
 %% ----------------- 4. Statistical Analysis & Visualization -----------------
 metrics = {'MMSE', 'MoCA', 'Accuracy', 'Education'};
 metricLabels = {'MMSE Score', 'MoCA Score', 'Stroop Accuracy (%)', 'Education (Years)'};
 
-figure('Color', 'w', 'Position', [100, 100, 1200, 900]);
-tlo = tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
-title(tlo, 'Brain-Behavior Coupling: Hemodynamic Lag vs. Clinical Scores', ...
+B = 2000;   % bootstrap reps for CI
+P = 5000;   % permutation reps for p-value
+
+figure('Color','w','Position',[100, 100, 1200, 900]);
+tlo = tiledlayout(2,2,'TileSpacing','compact','Padding','compact');
+title(tlo,'Brain-Behavior Coupling: Hemodynamic Lag vs. Clinical Scores', ...
     'FontSize', 18, 'FontWeight', 'bold');
 
 for m = 1:4
     target = metrics{m};
-    
-    lat = finalData.Latency(:);
-    val = finalData.(target)(:);
-    
-    % --- [Step 1] Partial Spearman Correlation (Stats) ---
-    if ~strcmpi(target, 'Education') && ~strcmpi(target, 'Age')
-        covars = [finalData.Education(:), finalData.Age(:)];
-        [rho_val, p_perm, ci_boot] = partial_spearman_robust(lat, val, covars, 2000, 5000);
+    ax = nexttile; hold on;
+
+    X = finalData.Latency(:);
+    Y = finalData.(target)(:);
+
+    % Decide covariates:
+    % - For MMSE/MoCA/Accuracy: adjust Education + Age
+    % - For Education: no covariates
+    if ~strcmpi(target,'Education') && ~strcmpi(target,'Age')
+        C = [finalData.Education(:), finalData.Age(:)];
         adjStr = '(adj. Edu, Age)';
     else
-        [rho_val, p_perm, ci_boot] = partial_spearman_robust(lat, val, [], 2000, 5000);
+        C = [];
         adjStr = '';
     end
-    
-    % --- [Step 2] Visualization ---
-    ax = nexttile; hold on;
-    
-    % (A) 전체 데이터에 대한 회귀선 추가 (Global Trend)
-    % NaN 제거 후 Polyfit
-    valid_mask = ~isnan(lat) & ~isnan(val);
-    gX = lat(valid_mask); gY = val(valid_mask);
-    
-    if ~isempty(gX)
+
+    % Partial Spearman: rho, CI (bootstrap), p (permutation)
+    stats = partial_spearman_perm_ci(X, Y, C, B, P);
+
+    % ----- Global trend line (optional; not inference) -----
+    valid_mask = isfinite(X) & isfinite(Y);
+    gX = X(valid_mask); gY = Y(valid_mask);
+    if numel(gX) >= 3
         [p_glob, S_glob] = polyfit(gX, gY, 1);
-        x_lin = linspace(min(lat), max(lat), 100);
+        x_lin = linspace(min(gX), max(gX), 100);
         [y_fit, delta] = polyval(p_glob, x_lin, S_glob);
-        
-        % 1. Global 95% CI (회색 음영)
         fill([x_lin, fliplr(x_lin)], [y_fit-delta, fliplr(y_fit+delta)], ...
-             'k', 'FaceAlpha', 0.1, 'EdgeColor', 'none', 'HandleVisibility', 'off');
-         
-        % 2. Global Regression Line (검은색 굵은 실선)
+            'k', 'FaceAlpha', 0.1, 'EdgeColor', 'none', 'HandleVisibility', 'off');
         plot(x_lin, y_fit, 'k-', 'LineWidth', 2.5, 'DisplayName', 'Overall Trend');
     end
-    
-    % (B) 그룹별 산점도 (Scatter Only)
-    % 그룹별 회귀선은 복잡해 보일 수 있으므로 제거하거나 얇게 처리 (여기선 점만 표시)
+
+    % ----- Group scatter -----
     for g = 1:3
-        idx = (finalData.Group == g);
-        gx = finalData.Latency(idx); gy = finalData.(target)(idx);
-        if isempty(gx), continue; end
-        
-        % 산점도 (Scatter)
-        scatter(gx, gy, 80, colors(g,:), 'filled', 'MarkerFaceAlpha', 0.6, ...
+        idx = (finalData.GroupNum == g) & isfinite(X) & isfinite(Y);
+        if ~any(idx), continue; end
+        scatter(X(idx), Y(idx), 80, colors(g,:), 'filled', 'MarkerFaceAlpha', 0.6, ...
             'DisplayName', groupNames{g});
     end
-    
-    % --- [Step 3] Labels & Style ---
-    pStr = sprintf('p_{perm} = %.4f', p_perm);
-    if p_perm < 0.001, pStr = 'p_{perm} < .001'; end
-    
-    subStr = sprintf('\\rho = %.3f, 95%% CI [%.2f, %.2f], %s %s', ...
-        rho_val, ci_boot(1), ci_boot(2), pStr, adjStr);
-    
+
+    % ----- Labels / subtitle -----
+    if stats.p_perm < 1/(P+1)
+        pStr = sprintf('p_{perm} < %.4g', 1/(P+1));
+    elseif stats.p_perm < 0.001
+        pStr = 'p_{perm} < .001';
+    else
+        pStr = sprintf('p_{perm} = %.4f', stats.p_perm);
+    end
+
+    subStr = sprintf('\\rho = %.3f, 95%% CI [%.2f, %.2f], %s %s, n=%d', ...
+        stats.rho, stats.ci(1), stats.ci(2), pStr, adjStr, stats.n);
+
     title(metricLabels{m}, 'FontSize', 14, 'FontWeight', 'bold');
     subtitle(subStr, 'FontSize', 11, 'FontAngle', 'italic', 'Color', [0.3 0.3 0.3]);
-    
     xlabel('Hemodynamic Latency (s)');
     ylabel(metricLabels{m});
-    % --- Y축 범위 개별 설정 추가 ---
+
+    % Optional axis constraints
     if strcmpi(target, 'MoCA')
-        ylim([-5, 32]);
-        yticks(-5:5:30); % 선택사항: 눈금 간격 조정
+        ylim([-5, 32]); yticks(-5:5:30);
     elseif strcmpi(target, 'Education')
-        ylim([0, 18]);
-        yticks(0:3:18);  % 선택사항: 눈금 간격 조정
+        ylim([0, 18]); yticks(0:3:18);
     end
-    % --------------------------
-    grid on; set(gca, 'TickDir', 'out', 'Box', 'on', 'LineWidth', 1.2);
-    
-    % 범례는 첫 번째 그래프에만 표시 (깔끔하게)
+
+    grid on; set(gca,'TickDir','out','Box','on','LineWidth',1.2);
+
     if m == 1
-        legend('Location', 'best', 'Box', 'off', 'FontSize', 10); 
+        legend('Location','best','Box','off','FontSize',10);
     end
 end
 
-% 저장
-%exportgraphics(tlo, fullfile(outputFolder, 'Figure_BrainBehavior_Subtitles.png'), 'Resolution', 300);
-
-% normalize IDs
-behavIDs = lower(strtrim(string(behavTable.SubjectID)));
-subjectFeatures.ID = string(subjectFeatures.ID); % ensure string
-subjectFeatures.ID = lower(strtrim(subjectFeatures.ID));
-
-finalData = table();
-for i = 1:height(subjectFeatures)
-    targetID = subjectFeatures.ID(i);
-    rowIdx = find(behavIDs == targetID);
-    if isempty(rowIdx), continue; end
-    temp = subjectFeatures(i,:);
-    % safe column access (use exist checks)
-    if any(strcmpi(behavTable.Properties.VariableNames,'MMSE')) && any(strcmpi(behavTable.Properties.VariableNames,'MMSE_1'))
-        temp.MMSE = mean([behavTable.MMSE(rowIdx), behavTable.MMSE_1(rowIdx)], 'omitnan');
-    elseif any(strcmpi(behavTable.Properties.VariableNames,'MMSE'))
-        temp.MMSE = behavTable.MMSE(rowIdx);
-    else
-        temp.MMSE = NaN;
+%% ----------------- 5. Reviewer defense outputs (recommended) -----------------
+% (A) Within-group correlations (no covariates) for Accuracy, MMSE, MoCA
+fprintf('\n=== Within-group Spearman (no covariates) ===\n');
+targets = {'MMSE','MoCA','Accuracy'};
+for t = 1:numel(targets)
+    Yname = targets{t};
+    for g = 1:3
+        idx = (finalData.GroupNum == g);
+        [rho_g, p_g, n_g] = spearman_simple(finalData.Latency(idx), finalData.(Yname)(idx));
+        fprintf('%s | %s: rho=%.3f, p=%.4f, n=%d\n', Yname, groupNames{g}, rho_g, p_g, n_g);
     end
-    % MoCA (case-insensitive)
-    if any(strcmpi(behavTable.Properties.VariableNames,'Moca')) || any(strcmpi(behavTable.Properties.VariableNames,'MoCA'))
-        temp.MoCA = behavTable{rowIdx, strcmpi(behavTable.Properties.VariableNames,'Moca') | strcmpi(behavTable.Properties.VariableNames,'MoCA')};
-    else
-        temp.MoCA = NaN;
-    end
-    % Stroop / Education / Age
-    if any(strcmpi(behavTable.Properties.VariableNames,'K_CWST')), temp.Accuracy = behavTable.K_CWST(rowIdx); else temp.Accuracy = NaN; end
-    if any(strcmpi(behavTable.Properties.VariableNames,'Education')), temp.Education = behavTable.Education(rowIdx); else temp.Education = NaN; end
-    if any(strcmpi(behavTable.Properties.VariableNames,'Age')), temp.Age = behavTable.Age(rowIdx); else temp.Age = NaN; end
-
-    finalData = [finalData; temp];
 end
 
-% Ensure numeric types
-finalData.Latency = double(finalData.Latency);
-finalData.Education = double(finalData.Education);
-finalData.Age = double(finalData.Age);
-finalData.MMSE = double(finalData.MMSE);
-finalData.MoCA = double(finalData.MoCA);
-finalData.Accuracy = double(finalData.Accuracy);
+% (B) Partial correlation controlling Group + Education + Age (pooled)
+% This addresses: "Is correlation independent of diagnostic group?"
+fprintf('\n=== Pooled partial Spearman controlling Group + Edu + Age ===\n');
+Cfull = [finalData.Education(:), finalData.Age(:), dummyvar(categorical(finalData.GroupNum))];
+Cfull = Cfull(:,1:end-1); % drop one dummy
+stats_gc = partial_spearman_perm_ci(finalData.Latency, finalData.Accuracy, Cfull, B, P);
+fprintf('Accuracy | control(Group,Edu,Age): rho=%.3f, p_perm=%.4f, CI=[%.3f, %.3f], n=%d\n', ...
+    stats_gc.rho, stats_gc.p_perm, stats_gc.ci(1), stats_gc.ci(2), stats_gc.n);
+fprintf('\n=== Does Latency predict global cognition beyond Accuracy? ===\n');
 
-% Ensure Group is categorical with known levels
-if ~iscategorical(finalData.Group)
-    finalData.Group = categorical(finalData.Group, unique(finalData.Group));
-end
-%% --- Example usage for MMSE (and Age sensitivity) ---
-[rho_mmse, p_mmse, ci_mmse] = partial_spearman_boot(finalData.Latency, finalData.MMSE, finalData.Education, 2000);
-% additionally adjust for Age by residualizing on two covariates
-% create combined covariate matrix by projecting out both (use linear regression on ranks)
-% (or call function twice with residualization on [Education Age] implemented)
+targets = {'MMSE','MoCA'};
+B = 2000; 
+P = 5000;
 
-fprintf('MMSE partial Spearman (adj Education): rho=%.3f, p~%.3f, 95CI=[%.3f, %.3f], n=%d\n', rho_mmse, p_mmse, ci_mmse(1), ci_mmse(2), sum(~isnan(finalData.Latency) & ~isnan(finalData.MMSE) & ~isnan(finalData.Education)));
-[rho_mmse, p_mmse, ci_mmse] = partial_spearman_boot(finalData.Latency, finalData.MoCA, finalData.Education, 2000);
-% additionally adjust for Age by residualizing on two covariates
-% create combined covariate matrix by projecting out both (use linear regression on ranks)
-% (or call function twice with residualization on [Education Age] implemented)
-
-fprintf('MoCA partial Spearman (adj Education): rho=%.3f, p~%.3f, 95CI=[%.3f, %.3f], n=%d\n', rho_mmse, p_mmse, ci_mmse(1), ci_mmse(2), sum(~isnan(finalData.Latency) & ~isnan(finalData.MMSE) & ~isnan(finalData.Education)));
-[rho_mmse, p_mmse, ci_mmse] = partial_spearman_boot(finalData.Latency, finalData.Accuracy, finalData.Education, 2000);
-% additionally adjust for Age by residualizing on two covariates
-% create combined covariate matrix by projecting out both (use linear regression on ranks)
-% (or call function twice with residualization on [Education Age] implemented)
-
-fprintf('Accuracy partial Spearman (adj Education): rho=%.3f, p~%.3f, 95CI=[%.3f, %.3f], n=%d\n', rho_mmse, p_mmse, ci_mmse(1), ci_mmse(2), sum(~isnan(finalData.Latency) & ~isnan(finalData.MMSE) & ~isnan(finalData.Education)));
-
-%% --- Pooled residual plot (adjust for Education & Age) ---
-targets = {'MMSE','MoCA','Accuracy'}; 
-B = 2000; P = 5000;
-
-for i = 1:numel(targets)
-    Yname = targets{i};
+for t = 1:numel(targets)
+    Yname = targets{t};
+    
     X = finalData.Latency;
     Y = finalData.(Yname);
-    C = finalData.Education; % adjust for education
-    % remove missing
-    ok = ~isnan(X) & ~isnan(Y) & ~isnan(C);
-    Xv = X(ok); Yv = Y(ok); Cv = C(ok);
-    n = numel(Xv);
-    if n < 6
-        fprintf('%s: insufficient data (n=%d). Skipping.\n', Yname, n);
-        continue;
+    
+    % Control: Accuracy + Education + Age + Group
+    Gdummy = dummyvar(categorical(finalData.GroupNum));
+    Gdummy = Gdummy(:,1:end-1);  % drop one level
+    
+    C = [finalData.Accuracy, finalData.Education, finalData.Age, Gdummy];
+    
+    stats = partial_spearman_perm_ci(X, Y, C, B, P);
+    
+    fprintf('%s | control(Accuracy,Edu,Age,Group): rho=%.3f, p_perm=%.4f, CI=[%.3f, %.3f], n=%d\n', ...
+        Yname, stats.rho, stats.p_perm, stats.ci(1), stats.ci(2), stats.n);
+end
+fprintf('\n=== Linearity check: Accuracy ~ Latency ===\n');
+
+X = finalData.Latency;
+Y = finalData.Accuracy;
+
+ok = isfinite(X) & isfinite(Y);
+X = X(ok); Y = Y(ok);
+
+% Linear model
+mdl1 = fitlm(X, Y);
+
+% Quadratic model
+mdl2 = fitlm(X, Y, 'quadratic');
+
+fprintf('Linear R^2 = %.3f\n', mdl1.Rsquared.Ordinary);
+fprintf('Quadratic R^2 = %.3f\n', mdl2.Rsquared.Ordinary);
+
+anova_tbl = anova(mdl2,'summary');
+disp('Model comparison (Linear vs Quadratic):');
+disp(anova_tbl);
+figure; 
+plotResiduals(mdl1, 'fitted');
+title('Residuals of Linear Model: Accuracy ~ Latency');
+
+%% ============================================================
+% FUNCTIONS
+%% ============================================================
+
+function stats = partial_spearman_perm_ci(x, y, covar, B, P)
+% Partial Spearman via rank-residualization:
+% 1) rank-transform x, y, covariates
+% 2) residualize rank(x), rank(y) w.r.t rank(covariates) by OLS
+% 3) rho = corr(res_x, res_y) (Pearson on residual ranks)
+% CI via bootstrap resampling; p via permutation (two-sided, +1 correction)
+
+    x = double(x(:)); y = double(y(:));
+
+    if isempty(covar)
+        ok = isfinite(x) & isfinite(y);
+        C = [];
+    else
+        covar = double(covar);
+        ok = isfinite(x) & isfinite(y) & all(isfinite(covar), 2);
+        C = covar(ok, :);
     end
 
-    % rank-transform
-    rx = tiedrank(Xv); ry = tiedrank(Yv); rc = tiedrank(Cv);
+    x = x(ok); y = y(ok);
+    n = numel(x);
+    stats.n = n;
 
-    % residualize ranks on covariate
-    bx = regress(rx, [ones(n,1), rc]); rx_res = rx - [ones(n,1), rc]*bx;
-    by = regress(ry, [ones(n,1), rc]); ry_res = ry - [ones(n,1), rc]*by;
+    if n < 6
+        stats.rho = NaN; stats.ci = [NaN NaN]; stats.p_perm = NaN;
+        return;
+    end
 
-    % observed rho
-    rho_obs = corr(rx_res, ry_res, 'Type', 'Pearson');
+    rx = tiedrank(x);
+    ry = tiedrank(y);
 
-    % bootstrap
+    if isempty(C)
+        Xcov = ones(n,1);
+    else
+        % Rank-transform each covariate column
+        RC = zeros(n, size(C,2));
+        for j = 1:size(C,2)
+            RC(:,j) = tiedrank(C(:,j));
+        end
+        Xcov = [ones(n,1), RC];
+    end
+
+    % Residualize ranks
+    bx = Xcov \ rx; rx_res = rx - Xcov*bx;
+    by = Xcov \ ry; ry_res = ry - Xcov*by;
+
+    rho_obs = corr(rx_res, ry_res, 'Type','Pearson');
+    stats.rho = rho_obs;
+
+    % ----- Bootstrap CI -----
     rng(0);
     bootrho = nan(B,1);
     for b = 1:B
         idx = randsample(n, n, true);
-        rx_b = rx(idx); ry_b = ry(idx); rc_b = rc(idx);
-        bx_b = regress(rx_b, [ones(n,1), rc_b]); rxr_b = rx_b - [ones(n,1), rc_b]*bx_b;
-        by_b = regress(ry_b, [ones(n,1), rc_b]); ryr_b = ry_b - [ones(n,1), rc_b]*by_b;
-        bootrho(b) = corr(rxr_b, ryr_b, 'Type', 'Pearson');
-    end
-    ci = prctile(bootrho, [2.5 97.5]);
-    % bootstrap p approximated by null-centered comparison (recommended: permutation)
-    p_boot = mean(abs(bootrho) >= abs(rho_obs)); % alternative: permutation below
+        rx_b = rx(idx); ry_b = ry(idx);
+        Xb = Xcov(idx, :);
 
-    % permutation test
+        bx_b = Xb \ rx_b; rxr_b = rx_b - Xb*bx_b;
+        by_b = Xb \ ry_b; ryr_b = ry_b - Xb*by_b;
+        bootrho(b) = corr(rxr_b, ryr_b, 'Type','Pearson');
+    end
+    stats.ci = prctile(bootrho, [2.5 97.5]);
+
+    % ----- Permutation p-value (two-sided) -----
     rng(1);
     perm_rho = nan(P,1);
     for k = 1:P
-        perm_idx = randsample(n, n, false);
+        perm_idx = randperm(n);
         ry_p = ry(perm_idx);
-        by_p = regress(ry_p, [ones(n,1), rc]); ryr_p = ry_p - [ones(n,1), rc]*by_p;
-        perm_rho(k) = corr(rx_res, ryr_p, 'Type', 'Pearson');
-    end
-    p_perm = mean(abs(perm_rho) >= abs(rho_obs));
 
-    % print
-    fprintf('%s: rho = %.3f, n = %d\n', Yname, rho_obs, n);
-    fprintf('  Bootstrap 95%% CI = [%.3f, %.3f]\n', ci(1), ci(2));
-    fprintf('  Bootstrap p (null-approx) = %.4f\n', p_boot);
-    fprintf('  Permutation p (two-sided) = %.4f\n\n', p_perm);
+        by_p = Xcov \ ry_p;
+        ryr_p = ry_p - Xcov*by_p;
+
+        perm_rho(k) = corr(rx_res, ryr_p, 'Type','Pearson');
+    end
+
+    % +1 correction to avoid p=0, two-sided
+    stats.p_perm = (sum(abs(perm_rho) >= abs(rho_obs)) + 1) / (P + 1);
 end
 
-%% --- Partial Spearman with bootstrap CI (function) ---
-function [rho, pval, ci] = partial_spearman_boot(x, y, covar, B)
-    if nargin < 4, B = 2000; end
-    % remove missing
-    ok = ~isnan(x) & ~isnan(y) & ~isnan(covar);
-    x = x(ok); y = y(ok); c = covar(ok);
+function [rho, p, n] = spearman_simple(x, y)
+% Simple Spearman correlation (no covariates), with analytic p-value
+    x = double(x(:)); y = double(y(:));
+    ok = isfinite(x) & isfinite(y);
+    x = x(ok); y = y(ok);
     n = numel(x);
     if n < 6
-        rho = NaN; pval = NaN; ci = [NaN NaN]; return;
+        rho = NaN; p = NaN; return;
     end
-    % rank transform
-    rx = tiedrank(x); ry = tiedrank(y); rc = tiedrank(c);
-    % residualize ranks on covariate
-    bx = regress(rx, [ones(n,1), rc]); rxr = rx - [ones(n,1), rc]*bx;
-    by = regress(ry, [ones(n,1), rc]); ryr = ry - [ones(n,1), rc]*by;
-    rho = corr(rxr, ryr, 'Type', 'Pearson');
-    % p-value via permutation (optional) or analytic
-    % bootstrap CI
-    bootrho = nan(B,1);
-    rng(0);
-    for b = 1:B
-        idx = randsample(n, n, true);
-        rx_b = rx(idx); ry_b = ry(idx); rc_b = rc(idx);
-        bx_b = regress(rx_b, [ones(n,1), rc_b]); rxr_b = rx_b - [ones(n,1), rc_b]*bx_b;
-        by_b = regress(ry_b, [ones(n,1), rc_b]); ryr_b = ry_b - [ones(n,1), rc_b]*by_b;
-        bootrho(b) = corr(rxr_b, ryr_b, 'Type', 'Pearson');
-    end
-    ci = prctile(bootrho, [2.5 97.5]);
-    % approximate p-value (two-sided)
-    pval = 2*min(mean(bootrho >= rho), mean(bootrho <= rho));
-end
-function [rho, p_perm, ci_boot] = partial_spearman_robust(x, y, covar, B, P)
-    x = x(:); 
-    y = y(:);
-    
-    if isempty(covar)
-        ok = ~isnan(x) & ~isnan(y);
-        x = x(ok); y = y(ok); 
-        n = numel(x);
-        rx = tiedrank(x); ry = tiedrank(y);
-        rx_res = rx - mean(rx); ry_res = ry - mean(ry);
-    else
-        ok = ~isnan(x) & ~isnan(y) & all(~isnan(covar), 2);
-        
-        x = x(ok); 
-        y = y(ok); 
-        c = covar(ok, :); 
-        
-        n = numel(x);
-        rx = tiedrank(x); 
-        ry = tiedrank(y);
-        rc = tiedrank(c); 
-        
-        X_cov = [ones(n, 1), rc];
-        bx = X_cov \ rx; rx_res = rx - X_cov * bx;
-        by = X_cov \ ry; ry_res = ry - X_cov * by;
-    end
-    
-    rho = corr(rx_res, ry_res, 'Type', 'Pearson');
-    
-    bootrho = zeros(B, 1);
-    for b = 1:B
-        idx = randsample(n, n, true);
-        if isempty(covar)
-            bootrho(b) = corr(rx(idx), ry(idx), 'Type', 'Spearman');
-        else
-            rx_b = rx(idx); ry_b = ry(idx); rc_b = rc(idx);
-            bx_b = regress(rx_b, [ones(n,1), rc_b]); rxr_b = rx_b - [ones(n,1), rc_b]*bx_b;
-            by_b = regress(ry_b, [ones(n,1), rc_b]); ryr_b = ry_b - [ones(n,1), rc_b]*by_b;
-            bootrho(b) = corr(rxr_b, ryr_b, 'Type', 'Pearson');
-        end
-    end
-    ci_boot = prctile(bootrho, [2.5 97.5]);
-    
-    perm_rho = zeros(P, 1);
-    for k = 1:P
-        perm_idx = randsample(n, n, false);
-        if isempty(covar)
-            perm_rho(k) = corr(rx, ry(perm_idx), 'Type', 'Pearson');
-        else
-            ry_p = ry(perm_idx);
-            by_p = regress(ry_p, [ones(n,1), rc]); ryr_p = ry_p - [ones(n,1), rc]*by_p;
-            perm_rho(k) = corr(rx_res, ryr_p, 'Type', 'Pearson');
-        end
-    end
-    p_perm = mean(abs(perm_rho) >= abs(rho));
+    [rho, p] = corr(x, y, 'Type','Spearman');
 end
